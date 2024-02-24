@@ -1,9 +1,10 @@
 import camelot
-import matplotlib.pyplot as plt
 from pymongo import MongoClient
 import math
 from camelot.handlers import PDFHandler
 import os
+import PyPDF2
+import warnings
 
 
 # Helper methods for _bbox
@@ -32,10 +33,10 @@ def get_closest_text(table, htext_objs):
     return best_guess
 
 
-def get_tables_and_titles(pdf_filename):
+def get_tables_and_titles(pdf_filename, page):
     """Here's my hacky code for grabbing tables and guessing at their titles"""
     my_handler = PDFHandler(pdf_filename)  # from camelot.handlers import PDFHandler
-    tables = camelot.read_pdf(pdf_filename, pages="all")
+    tables = camelot.read_pdf(pdf_filename, pages=f"{page}")
     print("Extracting {:d} tables...".format(tables.n))
     titles = []
     with camelot.utils.TemporaryDirectory() as tempdir:
@@ -71,26 +72,8 @@ def extract_properties(s):
     return course_name, location, instructor_name
 
 
-# Extracting data from the pdf file
+# File path of the PDF
 filename = "timetable_pdf/Main_Timetable.pdf"
-[titles, tables] = get_tables_and_titles(filename)
-
-# Fixing the days column empty cells
-current_label = ""
-for table in tables:
-    days_column = table.iloc[:, 0]
-    for index, value in days_column.items():
-        if value.strip() != "":
-            current_label = value
-        else:
-            table.iloc[index, 0] = current_label
-
-
-# filter the columns
-tables = [
-    table.iloc[:, [i for i in range(10) if i % 2 != 0 or i == 0]] for table in tables
-]
-
 
 # MongoDB conection
 client = MongoClient("localhost", 27017)
@@ -99,41 +82,67 @@ collection = db["timetable"]
 print(db.name)
 print(collection.name)
 
-# exttracting data from tables
+# Use PyPDF2 to get the number of pages
+reader = PyPDF2.PdfFileReader(filename)
+num_pages = reader.getNumPages()
+print(f"A total of {num_pages} pages found.\n")
+# Suppress warnings
+warnings.simplefilter("ignore")
 
-for index in range(len(tables)):
-    class_name = titles[index]
-    data = {"class": class_name.strip(), "courses": []}
+# Extract pages and their data one by one to limit memeory usage
+for page in range(1, num_pages + 1):
+    # Extracting data from the pdf file
+    [titles, tables] = get_tables_and_titles(filename, page)
 
-    # for row in tables[index]:
-    table = tables[index]
-    days_column = table.iloc[:, 0]
-    table = table.drop(table.columns[0], axis=1)
-    num_columns = table.shape[1]
-    for i in range(num_columns):
-        rows = table.iloc[:, i].tolist()
-        time = "-".join([x for i, x in enumerate(rows[0].split("\n")) if i != 0])
-        # print(rows)
-        for index, item in enumerate(rows[1:]):
-            if len(item.strip()) > 0:
-                course_name, location, instructor_name = extract_properties(item)
-                data["courses"].append(
-                    {
-                        "course": course_name,
-                        "time": time,
-                        "day": get_day_from_index(index, days_column),
-                        "room": location,
-                        "teacher": instructor_name,
-                    }
-                )
-                # print(
-                #    f"Time: {time}, Day: {get_day_from_index(index, days_column)}, Course Name: {course_name}, Location: {location}, Instructor: {instructor_name}"
-                # )
+    # Fixing the days column empty cells
+    current_label = ""
+    for table in tables:
+        days_column = table.iloc[:, 0]
+        for index, value in days_column.items():
+            if value.strip() != "":
+                current_label = value
+            else:
+                table.iloc[index, 0] = current_label
 
-    # Inserting data into the database
-    print(f"Inserting data for {class_name}...")
-    result = collection.insert_one(data)
-    print(f"Data inserted with id: {result.inserted_id}")
+    # filter the columns
+    tables = [
+        table.iloc[:, [i for i in range(10) if i % 2 != 0 or i == 0]]
+        for table in tables
+    ]
+
+    # exttracting data from tables
+
+    for index in range(len(tables)):
+        class_name = titles[index]
+        data = {"class": class_name.strip(), "courses": []}
+
+        # for row in tables[index]:
+        table = tables[index]
+        days_column = table.iloc[:, 0]
+        table = table.drop(table.columns[0], axis=1)
+        num_columns = table.shape[1]
+        for i in range(num_columns):
+            rows = table.iloc[:, i].tolist()
+            time = "-".join([x for i, x in enumerate(rows[0].split("\n")) if i != 0])
+            # print(rows)
+            for index, item in enumerate(rows[1:]):
+                if len(item.strip()) > 0:
+                    course_name, location, instructor_name = extract_properties(item)
+                    data["courses"].append(
+                        {
+                            "course": course_name,
+                            "time": time,
+                            "day": get_day_from_index(index, days_column),
+                            "room": location,
+                            "teacher": instructor_name,
+                        }
+                    )
+                    # print(f"Time: {time}, Day: {get_day_from_index(index, days_column)}, Course Name: {course_name}, Location: {location}, Instructor: {instructor_name}")
+
+        # Inserting data into the database
+        print(f"Inserting data for {class_name}...")
+        result = collection.insert_one(data)
+        print(f"Data inserted with id: {result.inserted_id}")
 
 
 """
